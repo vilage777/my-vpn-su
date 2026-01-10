@@ -1,145 +1,37 @@
-import requests
-import base64
-import json
-import socket
-import re
-import time
-import os
-from urllib.parse import urlparse, unquote
-from concurrent.futures import ThreadPoolExecutor
+name: Update VPN Configs
 
-# --- НАСТРОЙКИ ---
-# Используем mixed (смешанный) список, он обычно надежнее
-SOURCE_URL = "https://raw.githubusercontent.com/MatinGhanbari/v2ray-configs/main/mixed.txt"
-OUTPUT_FILE = "sub.txt"
-TOP_PER_COUNTRY = 10
-MAX_PING = 999  # Увеличил лимит пинга, чтобы хоть что-то нашлось
-TIMEOUT = 1.5
+on:
+  schedule:
+    - cron: '0 * * * *' # Запуск каждый час
+  workflow_dispatch:      # Кнопка ручного запуска
 
-# Заголовки, чтобы притвориться браузером
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
-}
+permissions:
+  contents: write
 
-def parse_config_info(config):
-    try:
-        ip, port, name = None, None, ""
-        if config.startswith("vmess://"):
-            b64 = config[8:]
-            missing_padding = len(b64) % 4
-            if missing_padding: b64 += '=' * (4 - missing_padding)
-            decoded = base64.b64decode(b64).decode('utf-8', errors='ignore')
-            data = json.loads(decoded)
-            ip = data.get("add")
-            port = data.get("port")
-            name = data.get("ps", "")
-        elif config.startswith("vless://") or config.startswith("trojan://") or config.startswith("ss://"):
-            parsed = urlparse(config)
-            ip = parsed.hostname
-            port = parsed.port
-            name = unquote(parsed.fragment) if parsed.fragment else ""
-        return ip, port, name
-    except:
-        return None, None, None
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
 
-def get_country_flag(name):
-    flags = re.findall(r'[\U0001F1E6-\U0001F1FF]{2}', name)
-    return flags[0] if flags else "🏳️ World"
+      - name: Set up Python
+        uses: actions/setup-python@v3
+        with:
+          python-version: '3.9'
 
-def check_ping(ip, port):
-    if not ip or not port: return 9999
-    try:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(TIMEOUT)
-        start = time.time()
-        res = sock.connect_ex((ip, int(port)))
-        sock.close()
-        if res == 0:
-            return int((time.time() - start) * 1000)
-    except:
-        pass
-    return 9999
+      - name: Install dependencies
+        run: pip install requests
 
-def process_config(config):
-    config = config.strip()
-    if not config: return None
-    ip, port, name = parse_config_info(config)
-    if not ip: return None
-    
-    latency = check_ping(ip, port)
-    if latency < MAX_PING:
-        return {
-            "config": config,
-            "latency": latency,
-            "country": get_country_flag(name)
-        }
-    return None
+      - name: Run script
+        run: python main.py
 
-def main():
-    print("🚀 Starting process...")
-    
-    # 1. Скачивание
-    lines = []
-    try:
-        resp = requests.get(SOURCE_URL, headers=HEADERS, timeout=20)
-        resp.raise_for_status()
-        
-        content = resp.text
-        # Пробуем декодировать base64, если это не обычный текст
-        if "vmess://" not in content and "vless://" not in content:
-            try:
-                content = base64.b64decode(content).decode('utf-8', errors='ignore')
-            except:
-                pass
-        
-        lines = list(set(content.strip().split('\n')))
-        print(f"📥 Downloaded {len(lines)} raw configs.")
-    except Exception as e:
-        print(f"❌ Critical Error Downloading: {e}")
-        # Не выходим, чтобы создать пустой файл и не ломать Git
-    
-    # Берем немного меньше для теста, но достаточно для результата
-    lines = lines[:1000]
-    
-    # 2. Проверка
-    valid_configs = []
-    if lines:
-        print(f"🔎 Checking {len(lines)} configs (Timeout: {TIMEOUT}s)...")
-        with ThreadPoolExecutor(max_workers=50) as executor:
-            results = executor.map(process_config, lines)
-            for r in results:
-                if r: valid_configs.append(r)
-    
-    print(f"✅ Found {len(valid_configs)} working configs.")
-
-    # 3. Сохранение
-    if valid_configs:
-        # Сортировка
-        countries = {}
-        for item in valid_configs:
-            c = item['country']
-            if c not in countries: countries[c] = []
-            countries[c].append(item)
-
-        final_list = []
-        for c, items in countries.items():
-            items.sort(key=lambda x: x['latency'])
-            top = items[:TOP_PER_COUNTRY]
-            for i in top: final_list.append(i['config'])
-            
-        result_text = "\n".join(final_list)
-        # Base64 кодировка для файла подписки
-        result_b64 = base64.b64encode(result_text.encode('utf-8')).decode('utf-8')
-    else:
-        # Если ничего не нашли - пишем заглушку, чтобы файл создался
-        print("⚠️ No working configs found! Writing placeholder.")
-        result_b64 = base64.b64encode(b"vmess://ERROR_NO_WORKING_CONFIGS").decode('utf-8')
-
-    # Запись файла ВСЕГДА
-    with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
-        f.write(result_b64)
-    
-    print(f"💾 File {OUTPUT_FILE} created successfully.")
-
-if __name__ == "__main__":
-    main()
+      - name: Commit and push changes
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git config --global user.name 'github-actions[bot]'
+          git config --global user.email 'github-actions[bot]@users.noreply.github.com'
+          git add sub.txt
+          # Эта команда принудительно обновляет файл
+          git diff --quiet && git diff --staged --quiet || (git commit -m "Auto-update configs" && git push "https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }}" HEAD:main)
