@@ -9,19 +9,25 @@ from urllib.parse import urlparse, unquote
 from concurrent.futures import ThreadPoolExecutor
 
 # --- НАСТРОЙКИ ---
-SOURCE_URL = "https://raw.githubusercontent.com/MatinGhanbari/v2ray-configs/main/all_configs.txt"
-OUTPUT_FILE = "sub.txt" # Имя файла подписки
+SOURCE_URL = "https://raw.githubusercontent.com/MatinGhanbari/v2ray-configs/main/mixed.txt"
+OUTPUT_FILE = "sub.txt"
 TOP_PER_COUNTRY = 10
-MAX_PING = 700
+MAX_PING = 2000 # Высокий порог, чтобы точно нашлось
+TIMEOUT = 2.0
+
+# Чтобы нас не блокировали
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+}
 
 def parse_config_info(config):
     try:
         ip, port, name = None, None, ""
         if config.startswith("vmess://"):
             b64 = config[8:]
-            missing_padding = len(b64) % 4
-            if missing_padding: b64 += '=' * (4 - missing_padding)
-            data = json.loads(base64.b64decode(b64).decode('utf-8'))
+            pad = len(b64) % 4
+            if pad: b64 += '=' * (4 - pad)
+            data = json.loads(base64.b64decode(b64).decode('utf-8', errors='ignore'))
             ip = data.get("add")
             port = data.get("port")
             name = data.get("ps", "")
@@ -36,18 +42,20 @@ def parse_config_info(config):
 
 def get_country_flag(name):
     flags = re.findall(r'[\U0001F1E6-\U0001F1FF]{2}', name)
-    return flags[0] if flags else "🏳️ Other"
+    return flags[0] if flags else "🏳️ World"
 
 def check_ping(ip, port):
     if not ip or not port: return 9999
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(1.0) # Быстрый таймаут (1 сек)
+        sock.settimeout(TIMEOUT)
         start = time.time()
         res = sock.connect_ex((ip, int(port)))
         sock.close()
-        if res == 0: return int((time.time() - start) * 1000)
-    except: pass
+        if res == 0:
+            return int((time.time() - start) * 1000)
+    except:
+        pass
     return 9999
 
 def process_config(config):
@@ -62,48 +70,57 @@ def process_config(config):
     return None
 
 def main():
-    print("Download configs...")
+    print("🚀 Starting...")
+    lines = []
     try:
-        resp = requests.get(SOURCE_URL)
-        # Если пришло в base64
-        if "vmess" not in resp.text and "vless" not in resp.text:
-             content = base64.b64decode(resp.text).decode('utf-8')
-        else:
-             content = resp.text
+        resp = requests.get(SOURCE_URL, headers=HEADERS, timeout=30)
+        content = resp.text
+        # Простая проверка на base64
+        if "vmess://" not in content and "vless://" not in content:
+            try:
+                content = base64.b64decode(content).decode('utf-8', errors='ignore')
+            except: pass
+        
         lines = list(set(content.strip().split('\n')))
-    except:
-        return
+        print(f"📥 Downloaded {len(lines)} configs.")
+    except Exception as e:
+        print(f"❌ Error: {e}")
 
-    # Ограничиваем кол-во для проверки, чтобы уложиться в лимиты GitHub Free
-    # Берем последние 1000 (обычно они свежее)
-    lines = lines[:1000]
-
-    valid = []
-    with ThreadPoolExecutor(max_workers=40) as executor:
-        results = executor.map(process_config, lines)
-        for r in results:
-            if r: valid.append(r)
-
-    # Группировка
-    countries = {}
-    for item in valid:
-        c = item['country']
-        if c not in countries: countries[c] = []
-        countries[c].append(item)
-
-    final_configs = []
-    for c, items in countries.items():
-        items.sort(key=lambda x: x['latency'])
-        top = items[:TOP_PER_COUNTRY]
-        for i in top: final_configs.append(i['config'])
+    # Ограничим для теста
+    lines = lines[:800]
     
-    # Кодируем в Base64 для подписки
-    result_text = "\n".join(final_configs)
-    result_b64 = base64.b64encode(result_text.encode('utf-8')).decode('utf-8')
+    valid_configs = []
+    if lines:
+        print("🔎 Checking...")
+        with ThreadPoolExecutor(max_workers=50) as executor:
+            results = executor.map(process_config, lines)
+            for r in results:
+                if r: valid_configs.append(r)
     
-    with open(OUTPUT_FILE, "w") as f:
+    print(f"✅ Found {len(valid_configs)} working.")
+
+    if valid_configs:
+        countries = {}
+        for item in valid_configs:
+            c = item['country']
+            if c not in countries: countries[c] = []
+            countries[c].append(item)
+
+        final_list = []
+        for c, items in countries.items():
+            items.sort(key=lambda x: x['latency'])
+            top = items[:TOP_PER_COUNTRY]
+            for i in top: final_list.append(i['config'])
+            
+        result_text = "\n".join(final_list)
+        result_b64 = base64.b64encode(result_text.encode('utf-8')).decode('utf-8')
+    else:
+        print("⚠️ Empty list, creating placeholder.")
+        result_b64 = base64.b64encode(b"vmess://empty").decode('utf-8')
+
+    with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
         f.write(result_b64)
-    print(f"Done. Saved {len(final_configs)} configs.")
+    print("💾 Done.")
 
 if __name__ == "__main__":
     main()
