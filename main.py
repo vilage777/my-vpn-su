@@ -4,18 +4,17 @@ import json
 import socket
 import re
 import time
-import os
 from urllib.parse import urlparse, unquote
 from concurrent.futures import ThreadPoolExecutor
 
-# --- НАСТРОЙКИ ---
-SOURCE_URL = "https://raw.githubusercontent.com/MatinGhanbari/v2ray-configs/main/mixed.txt"
+# --- ТВОЯ ССЫЛКА ---
+# Я преобразовал путь в прямую ссылку на Raw-файл
+SOURCE_URL = "https://raw.githubusercontent.com/MatinGhanbari/v2ray-configs/main/subscriptions/v2ray/all_sub.txt"
+
 OUTPUT_FILE = "sub.txt"
 TOP_PER_COUNTRY = 10
-MAX_PING = 2000 # Высокий порог, чтобы точно нашлось
-TIMEOUT = 2.0
+TIMEOUT = 2.0 # Таймаут проверки
 
-# Чтобы нас не блокировали
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
 }
@@ -27,7 +26,8 @@ def parse_config_info(config):
             b64 = config[8:]
             pad = len(b64) % 4
             if pad: b64 += '=' * (4 - pad)
-            data = json.loads(base64.b64decode(b64).decode('utf-8', errors='ignore'))
+            decoded = base64.b64decode(b64).decode('utf-8', errors='ignore')
+            data = json.loads(decoded)
             ip = data.get("add")
             port = data.get("port")
             name = data.get("ps", "")
@@ -65,39 +65,59 @@ def process_config(config):
     if not ip: return None
     
     latency = check_ping(ip, port)
-    if latency < MAX_PING:
+    # Оставляем только живые (пинг меньше 2000мс)
+    if latency < 2000:
         return {"config": config, "latency": latency, "country": get_country_flag(name)}
     return None
 
 def main():
-    print("🚀 Starting...")
+    print(f"🚀 Downloading from: {SOURCE_URL}")
     lines = []
+    
     try:
-        resp = requests.get(SOURCE_URL, headers=HEADERS, timeout=30)
-        content = resp.text
-        # Простая проверка на base64
-        if "vmess://" not in content and "vless://" not in content:
-            try:
-                content = base64.b64decode(content).decode('utf-8', errors='ignore')
-            except: pass
+        resp = requests.get(SOURCE_URL, headers=HEADERS, timeout=20)
+        if resp.status_code != 200:
+            raise Exception(f"Status code: {resp.status_code}")
+            
+        content = resp.text.strip()
         
-        lines = list(set(content.strip().split('\n')))
-        print(f"📥 Downloaded {len(lines)} configs.")
-    except Exception as e:
-        print(f"❌ Error: {e}")
+        # --- ВАЖНО: Декодирование ---
+        # Файлы подписок обычно зашифрованы в Base64. Пробуем расшифровать.
+        try:
+            # Если это Base64 строка (без пробелов), декодируем
+            if "vmess://" not in content and "vless://" not in content:
+                decoded_content = base64.b64decode(content).decode('utf-8', errors='ignore')
+                lines = decoded_content.split('\n')
+                print("✅ Successfully decoded Base64 subscription.")
+            else:
+                # Если это просто текст
+                lines = content.split('\n')
+                print("✅ File is plain text.")
+        except Exception as e:
+            print(f"⚠️ Decode failed, trying as plain text. Error: {e}")
+            lines = content.split('\n')
 
-    # Ограничим для теста
-    lines = lines[:800]
+    except Exception as e:
+        print(f"❌ Error downloading: {e}")
+        # Если ошибка скачивания, создадим файл с ошибкой, чтобы Git не ругался
+        with open(OUTPUT_FILE, "w") as f:
+            f.write(base64.b64encode(b"vmess://ERROR_DOWNLOAD_CHECK_LOGS").decode())
+        return
+
+    # Чистим пустые строки
+    lines = [x.strip() for x in lines if x.strip()]
+    print(f"📥 Found {len(lines)} configs. Checking connectivity...")
+    
+    # Берем первые 2000 для проверки
+    lines = lines[:2000]
     
     valid_configs = []
-    if lines:
-        print("🔎 Checking...")
-        with ThreadPoolExecutor(max_workers=50) as executor:
-            results = executor.map(process_config, lines)
-            for r in results:
-                if r: valid_configs.append(r)
-    
-    print(f"✅ Found {len(valid_configs)} working.")
+    with ThreadPoolExecutor(max_workers=50) as executor:
+        results = executor.map(process_config, lines)
+        for r in results:
+            if r: valid_configs.append(r)
+            
+    print(f"✅ Working configs found: {len(valid_configs)}")
 
     if valid_configs:
         countries = {}
@@ -115,12 +135,13 @@ def main():
         result_text = "\n".join(final_list)
         result_b64 = base64.b64encode(result_text.encode('utf-8')).decode('utf-8')
     else:
-        print("⚠️ Empty list, creating placeholder.")
-        result_b64 = base64.b64encode(b"vmess://empty").decode('utf-8')
+        print("⚠️ No working configs found in this file.")
+        result_b64 = base64.b64encode(b"vmess://NO_WORKING_CONFIGS_FOUND").decode('utf-8')
 
     with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
         f.write(result_b64)
-    print("💾 Done.")
+    
+    print("💾 File saved.")
 
 if __name__ == "__main__":
     main()
