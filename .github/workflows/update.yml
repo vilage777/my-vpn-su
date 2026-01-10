@@ -14,6 +14,8 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v3
+        with:
+          ref: ${{ github.head_ref }}
 
       - name: Set up Python
         uses: actions/setup-python@v3
@@ -26,21 +28,19 @@ jobs:
       - name: Run script
         run: python main.py
 
-      - name: Debug - Show files
-        run: ls -la # Эта команда покажет в логах, создался ли файл
-
-      - name: Force Push changes
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Verify file creation
         run: |
-          git config --global user.name 'github-actions[bot]'
-          git config --global user.email 'github-actions[bot]@users.noreply.github.com'
-          
-          # Добавляем файл
-          git add sub.txt
-          
-          # Делаем коммит. Если изменений нет - вылетит ошибка (и это хорошо, мы узнаем)
-          git commit -m "Update configs $(date)"
-          
-          # Отправляем
-          git push "https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }}" HEAD:main
+          if [ -f "sub.txt" ]; then
+            echo "✅ FILE EXISTS!"
+            ls -l sub.txt
+          else
+            echo "❌ FILE MISSING!"
+            exit 1
+          fi
+
+      - name: Auto Commit
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "Auto-update VPN list"
+          file_pattern: sub.txt
+          push_options: '--force'
